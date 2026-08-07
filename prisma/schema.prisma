@@ -1,0 +1,538 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Identity & tenancy ----------
+
+model User {
+  id            String   @id @default(uuid())
+  email         String   @unique
+  name          String
+  passwordHash  String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  memberships     OrganizationMembership[]
+  passwordResets  PasswordResetToken[]
+  calls           Call[]                   @relation("CallOwner")
+  feedback        RecommendationFeedback[]
+  auditLogs       AuditLog[]
+  transcriptEdits TranscriptSegment[]      @relation("SegmentEditor")
+}
+
+model PasswordResetToken {
+  id        String   @id @default(uuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Organization {
+  id        String    @id @default(uuid())
+  name      String
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  memberships     OrganizationMembership[]
+  customers       Customer[]
+  documents       Document[]
+  calls           Call[]
+  recommendations Recommendation[]
+  feedback        RecommendationFeedback[]
+  integrations    IntegrationConnection[]
+  auditLogs       AuditLog[]
+  settings        OrganizationSetting[]
+  aiUsage         AIUsageRecord[]
+  invites         OrganizationInvite[]
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  SPECIALIST
+  READ_ONLY
+}
+
+model OrganizationMembership {
+  id             String       @id @default(uuid())
+  organizationId String
+  userId         String
+  role           Role         @default(SPECIALIST)
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+model OrganizationInvite {
+  id             String       @id @default(uuid())
+  organizationId String
+  email          String
+  role           Role         @default(SPECIALIST)
+  tokenHash      String       @unique
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  createdAt      DateTime     @default(now())
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+// ---------- Customers ----------
+
+model Customer {
+  id                     String    @id @default(uuid())
+  organizationId         String
+  name                   String
+  website                String?
+  industry               String?
+  description            String?
+  primaryProducts        String[]
+  crmPlatform            String?
+  subscriptionTier       String?
+  architectureNotes      String?
+  dataArchitectureNotes  String?
+  securityRequirements   String?
+  implementationPhase    String?
+  internalNotes          String?
+  customTerminology      Json? // [{ term, meaning }]
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+  deletedAt              DateTime?
+
+  organization    Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  contacts        CustomerContact[]
+  technologies    CustomerTechnology[]
+  integrations    CustomerIntegration[]
+  issues          CustomerIssue[]
+  documents       Document[]
+  calls           Call[]
+  recommendations Recommendation[]
+  actionItems     ActionItem[]
+
+  @@index([organizationId])
+  @@index([organizationId, name])
+}
+
+model CustomerContact {
+  id         String   @id @default(uuid())
+  customerId String
+  name       String
+  title      String?
+  email      String?
+  phone      String?
+  isPrimary  Boolean  @default(false)
+  notes      String?
+  createdAt  DateTime @default(now())
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+}
+
+model CustomerTechnology {
+  id         String   @id @default(uuid())
+  customerId String
+  name       String
+  category   String? // crm | automation | enrichment | data | other
+  notes      String?
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+}
+
+model CustomerIntegration {
+  id           String   @id @default(uuid())
+  customerId   String
+  sourceSystem String
+  targetSystem String
+  syncType     String? // native | zapier | make | custom | api
+  direction    String? // one-way | two-way
+  status       String? // active | broken | paused
+  notes        String?
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+}
+
+model CustomerIssue {
+  id          String    @id @default(uuid())
+  customerId  String
+  title       String
+  description String?
+  status      String    @default("open") // open | monitoring | resolved
+  severity    String    @default("medium")
+  resolution  String?
+  resolvedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  customer    Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, status])
+}
+
+// ---------- Knowledge base ----------
+
+enum DocumentStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+model Document {
+  id             String         @id @default(uuid())
+  organizationId String
+  customerId     String? // null = org-wide
+  platform       String? // hubspot | salesforce | ...
+  title          String
+  documentType   String? // guide | runbook | architecture | contract | playbook | resolved-case | other
+  fileName       String?
+  mimeType       String?
+  storageKey     String?
+  sizeBytes      Int?
+  status         DocumentStatus @default(PENDING)
+  errorMessage   String?
+  accessLevel    String         @default("organization") // organization | customer
+  source         String         @default("upload") // upload | manual | resolved-case | connector
+  version        Int            @default(1)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer     Customer?       @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  chunks       DocumentChunk[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, customerId])
+}
+
+model DocumentChunk {
+  id             String   @id @default(uuid())
+  documentId     String
+  organizationId String // denormalized for hard tenant filtering
+  customerId     String?
+  chunkIndex     Int
+  content        String
+  section        String?
+  page           Int?
+  tokenCount     Int?
+  embedding      Float[] // cosine ranked in the retrieval service; pgvector is the documented upgrade path
+  createdAt      DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, chunkIndex])
+  @@index([organizationId, customerId])
+}
+
+// ---------- Calls ----------
+
+enum CallStatus {
+  DRAFT
+  LIVE
+  PAUSED
+  ENDED
+}
+
+model Call {
+  id               String     @id @default(uuid())
+  organizationId   String
+  customerId       String?
+  ownerId          String
+  title            String
+  callType         String // discovery | demo | implementation | troubleshooting | support | architecture_review | customer_success | escalation | internal | other
+  meetingPlatform  String? // zoom | teams | meet | phone | other
+  products         String[]
+  objective        String?
+  knownIssue       String?
+  consentConfirmed Boolean    @default(false)
+  status           CallStatus @default(DRAFT)
+  startedAt        DateTime?
+  endedAt          DateTime?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  organization    Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer        Customer?           @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  owner           User                @relation("CallOwner", fields: [ownerId], references: [id])
+  participants    CallParticipant[]
+  segments        TranscriptSegment[]
+  events          DetectedEvent[]
+  recommendations Recommendation[]
+  resolution      Resolution?
+  actionItems     ActionItem[]
+  review          CallReview?
+
+  @@index([organizationId, status])
+  @@index([organizationId, customerId])
+  @@index([organizationId, createdAt])
+}
+
+model CallParticipant {
+  id       String  @id @default(uuid())
+  callId   String
+  name     String
+  roleType String  @default("customer") // customer | specialist | internal | other
+  call     Call    @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([callId])
+}
+
+model TranscriptSegment {
+  id             String    @id @default(uuid())
+  callId         String
+  organizationId String
+  speakerName    String
+  speakerRole    String    @default("customer") // customer | specialist | internal | other
+  content        String
+  isInterim      Boolean   @default(false)
+  isImportant    Boolean   @default(false)
+  editedById     String?
+  spokenAt       DateTime  @default(now())
+  createdAt      DateTime  @default(now())
+
+  call     Call  @relation(fields: [callId], references: [id], onDelete: Cascade)
+  editedBy User? @relation("SegmentEditor", fields: [editedById], references: [id])
+
+  @@index([callId, spokenAt])
+  @@index([organizationId])
+}
+
+model DetectedEvent {
+  id             String   @id @default(uuid())
+  callId         String
+  organizationId String
+  segmentId      String?
+  eventType      String // technical_question | troubleshooting_issue | objection | feature_request | ...
+  summary        String?
+  triggerText    String?
+  fingerprint    String? // duplicate detection
+  createdAt      DateTime @default(now())
+
+  call            Call             @relation(fields: [callId], references: [id], onDelete: Cascade)
+  recommendations Recommendation[]
+
+  @@index([callId, createdAt])
+  @@index([callId, fingerprint])
+}
+
+// ---------- Recommendations ----------
+
+model Recommendation {
+  id             String   @id @default(uuid())
+  organizationId String
+  customerId     String?
+  callId         String
+  eventId        String?
+  eventType      String
+  issueSummary   String
+  payload        Json // full validated structured response
+  confidence     Float
+  riskLevel      String   @default("low")
+  triggerText    String?
+  latencyMs      Int?
+  createdAt      DateTime @default(now())
+
+  organization Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  customer     Customer?                @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  call         Call                     @relation(fields: [callId], references: [id], onDelete: Cascade)
+  event        DetectedEvent?           @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  sources      RecommendationSource[]
+  feedback     RecommendationFeedback[]
+
+  @@index([organizationId, createdAt])
+  @@index([callId, createdAt])
+}
+
+model RecommendationSource {
+  id               String  @id @default(uuid())
+  recommendationId String
+  documentId       String?
+  title            String
+  section          String?
+  relevance        String?
+
+  recommendation Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+
+  @@index([recommendationId])
+}
+
+model RecommendationFeedback {
+  id                    String   @id @default(uuid())
+  recommendationId      String
+  userId                String
+  organizationId        String
+  customerId            String?
+  callId                String
+  rating                String // helpful | partially_helpful | incorrect | dismissed
+  usedOnCall            Boolean  @default(false)
+  editedBeforeUse       Boolean  @default(false)
+  issueResolved         Boolean  @default(false)
+  issuePartiallyResolved Boolean @default(false)
+  incorrectDiagnosis    Boolean  @default(false)
+  escalated             Boolean  @default(false)
+  finalRootCause        String?
+  finalResolution       String?
+  notes                 String?
+  createdAt             DateTime @default(now())
+
+  recommendation Recommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  user           User           @relation(fields: [userId], references: [id])
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+  @@index([recommendationId])
+}
+
+// ---------- Resolution & post-call ----------
+
+model Resolution {
+  id                    String   @id @default(uuid())
+  callId                String   @unique
+  organizationId        String
+  finalIssueSummary     String?
+  confirmedRootCause    String?
+  finalResolution       String?
+  customerConfirmedFix  Boolean  @default(false)
+  followUpRequired      Boolean  @default(false)
+  engineeringEscalation Boolean  @default(false)
+  docsToUpdate          String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+model CallReview {
+  id             String   @id @default(uuid())
+  callId         String   @unique
+  organizationId String
+  content        Json // generated + user-edited post-call sections
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+model ActionItem {
+  id             String    @id @default(uuid())
+  organizationId String
+  customerId     String?
+  callId         String?
+  description    String
+  ownerType      String    @default("internal") // internal | customer
+  status         String    @default("open") // open | done
+  dueDate        DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  call     Call?     @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@index([customerId])
+}
+
+// ---------- Integrations, settings, audit, usage ----------
+
+model IntegrationConnection {
+  id                   String    @id @default(uuid())
+  organizationId       String
+  provider             String // hubspot | salesforce | jira | asana | github | slack | gdrive | notion | confluence | zendesk | mock
+  displayName          String
+  status               String    @default("disconnected") // connected | disconnected | error
+  readOnly             Boolean   @default(true)
+  encryptedCredentials String? // AES-256-GCM, never returned to clients
+  credentialHint       String? // e.g. "pat-na1-****3f2a"
+  config               Json?
+  lastSyncedAt         DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, provider])
+}
+
+model OrganizationSetting {
+  id             String       @id @default(uuid())
+  organizationId String
+  key            String
+  value          Json
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, key])
+}
+
+model AuditLog {
+  id             String   @id @default(uuid())
+  organizationId String
+  userId         String?
+  action         String
+  resourceType   String
+  resourceId     String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action])
+}
+
+model AIUsageRecord {
+  id             String   @id @default(uuid())
+  organizationId String
+  provider       String
+  model          String
+  operation      String // recommendation | copilot | postcall | embedding
+  inputTokens    Int      @default(0)
+  outputTokens   Int      @default(0)
+  latencyMs      Int?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+}
+
+// ---------- Playbooks (seeded troubleshooting templates) ----------
+
+model PlaybookTemplate {
+  id                  String   @id @default(uuid())
+  organizationId      String? // null = built-in, available to all orgs
+  slug                String
+  title               String
+  platforms           String[]
+  symptoms            String[]
+  clarifyingQuestions String[]
+  likelyCauses        Json // [{ cause, likelihood, verificationStep }]
+  safeActions         String[]
+  riskyActions        String[]
+  escalationCriteria  String[]
+  captureFields       String[]
+  createdAt           DateTime @default(now())
+
+  @@unique([organizationId, slug])
+  @@index([organizationId])
+}
