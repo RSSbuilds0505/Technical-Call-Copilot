@@ -1,3 +1,0 @@
-# Pin Node 20 so the build matches local development.
-[phases.setup]
-nixPkgs = ["nodejs_20"]
